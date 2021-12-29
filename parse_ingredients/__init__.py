@@ -11,6 +11,7 @@ class Ingredient:
     original_string : str
 
 # a predefined list of unit's
+# TODO this approach doesn't work with multi word units (ex. small bunch).
 units = {
     "l": ["l", "litre", "litres", "liter", "liters"],
     "ml": ["ml", "millilitre", "milli litre", "millilitres", "milli litres", "milliliter", "milli liter", "milliliters", "milli liters"],
@@ -26,6 +27,8 @@ units = {
     "pint": ["pint", "pints"],
     "pinch": ["pinch"],
     "dash": ["dash"],
+    "bunch": ["bunch"],
+    "pack": ["pack", "packet"],
     "strip": ["strip", "strips"],
     "can": ["can", "cans"],
     "envelope": ["envelope", "envelopes", "sheet", "sheets"],
@@ -194,13 +197,13 @@ def parse_ingredient(raw_ingredient : str) -> Ingredient:
         rest = ingredient[last_quantity_character:]
 
     # Now split the rest of the string.
-    splitted = rest.split(' ')
+    splitted = rest.strip().split(' ')
 
     # If the string is just one more word, it's probably safe to assume
     # that there is no unit string available, but we're dealing with, 
     # for example: 1 egg, where egg is both the ingredient and unit.
     if len(splitted) == 1:
-        return Ingredient(rest, quantity, '', comment, ingredient)
+        return Ingredient(rest.strip(), quantity, '', comment, ingredient)
     
     # let's see if we can find something in the string that matches any
     # of my defined units. The list isn't finished and will probably miss
@@ -208,7 +211,9 @@ def parse_ingredient(raw_ingredient : str) -> Ingredient:
     # "1 fresh egg" gives us a unit "fresh". Here the unit will be undefined 
     # and 'fresh egg' will be the ingredient. This should probably later be 
     # filtered again.
+
     wouldBeUnit = splitted[0]
+
     for key in units:
         value = units[key]
         if wouldBeUnit in value:
@@ -219,9 +224,17 @@ def parse_ingredient(raw_ingredient : str) -> Ingredient:
     if unit != '':
         name = ' '.join(splitted[1:])
     else:
-        name = ' '.join(splitted)
+        wouldBeUnit = splitted[-1]
+        for key in units:
+            value = units[key]
+            if wouldBeUnit in value:
+                unit = key
+        if unit != '':
+            name = ' '.join(splitted[:-1])
+        else:
+            name = ' '.join(splitted)
 
     # and voila! The most basic ingredient parser ever.
     # as I said, I'm not too happy with it and NLP would probably
     # be a better fit, but this brings more complexity
-    return Ingredient(name.strip(' '), quantity, unit, comment, raw_ingredient)
+    return Ingredient(name.strip(), quantity, unit, comment, raw_ingredient)
