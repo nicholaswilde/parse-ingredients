@@ -1,5 +1,10 @@
 import unicodedata
+import subprocess
 import re
+import tempfile
+import json
+import sys
+from types import SimpleNamespace
 from dataclasses import dataclass
 
 @dataclass
@@ -136,6 +141,12 @@ def parse_ingredient(raw_ingredient : str) -> Ingredient:
     name = ''
     comment = ''
 
+    crf_output = _exec_crf_test(raw_ingredient, "./models/ingredients.crfmodel")
+    data = import_data(crf_output.split('\n'))
+    data = data[0]
+    return Ingredient(data["name"].strip(), data["qty"], data["unit"], data["comment"], data["input"])
+    sys.exit()
+    
     # Recipe websites tend to put a comment between parantheses. 
     # for example: 1 (fresh) egg. Let's see if we can find any and extract it
     betweenMatch = betweenParanthesesMatch.search(ingredient)
@@ -238,3 +249,292 @@ def parse_ingredient(raw_ingredient : str) -> Ingredient:
     # as I said, I'm not too happy with it and NLP would probably
     # be a better fit, but this brings more complexity
     return Ingredient(name.strip(), quantity, unit, comment, raw_ingredient)
+
+
+def _exec_crf_test(input_text, model_path):
+    with tempfile.NamedTemporaryFile(mode='w') as input_file:
+        input_file.write(export_data(input_text))
+        input_file.flush()
+        return subprocess.check_output(
+              ['crf_test', '--verbose=1', '--model', model_path,
+               input_file.name]).decode('utf-8')
+                     
+                     
+
+def _convert_crf_output_to_json(crf_output):
+    return json.dumps(import_data(crf_output), indent=2, sort_keys=True)
+                         
+                         
+def main(args):
+   raw_ingredient_lines = [x for x in sys.stdin.readlines() if x]
+   crf_output = _exec_crf_test(raw_ingredient_lines, args.model_file)
+   print(_convert_crf_output_to_json(crf_output.split('\n')))
+
+def export_data(line):
+    """ Parse "raw" ingredient lines into CRF-ready output """
+    output = []
+    line_clean = re.sub('<[^<]+?>', '', line)
+    tokens = tokenize(line_clean)
+    
+    for i, token in enumerate(tokens):
+        features = getFeatures(token, i + 1, tokens)
+        output.append(joinLine([token] + features))
+    output.append('')
+    return '\n'.join(output)
+
+
+def tokenize(s):
+    """
+    Tokenize on parenthesis, punctuation, spaces and American units followed by a slash.
+    We sometimes give American units and metric units for baking recipes. For example:
+        * 2 tablespoons/30 mililiters milk or cream
+        * 2 1/2 cups/300 grams all-purpose flour
+            The recipe database only allows for one unit, and we want to use the American one.
+                But we must split the text on "cups/" etc. in order to pick it up.
+                    """
+                
+    # handle abbreviation like "100g" by treating it as "100 grams"
+    s = re.sub(r'(\d+)g', r'\1 grams', s)
+    s = re.sub(r'(\d+)oz', r'\1 ounces', s)
+    s = re.sub(r'(\d+)ml', r'\1 milliliters', s, flags=re.IGNORECASE)
+
+    american_units = [
+        'cup', 'tablespoon', 'teaspoon', 'pound', 'ounce', 'quart', 'pint'
+    ]
+    # The following removes slashes following American units and replaces it with a space.
+    for unit in american_units:
+        s = s.replace(unit + '/', unit + ' ')
+        s = s.replace(unit + 's/', unit + 's ')
+
+    return [
+        token.strip()
+        for token in re.split(r'([,()\s]{1})', clumpFractions(s))
+        if token and token.strip()
+            ]
+
+def import_data(lines):
+    """
+    This thing takes the output of CRF++ and turns it into an actual
+    data structure.
+    """
+    data = [{}]
+    display = [[]]
+    prevTag = None
+    #
+    # iterate lines in the data file, which looks like:
+    #
+    #   # 0.511035
+    #   1/2       I1  L12  NoCAP  X  B-QTY/0.982850
+    #   teaspoon  I2  L12  NoCAP  X  B-UNIT/0.982200
+    #   fresh     I3  L12  NoCAP  X  B-COMMENT/0.716364
+    #   thyme     I4  L12  NoCAP  X  B-NAME/0.816803
+    #   leaves    I5  L12  NoCAP  X  I-NAME/0.960524
+    #   ,         I6  L12  NoCAP  X  B-COMMENT/0.772231
+    #   finely    I7  L12  NoCAP  X  I-COMMENT/0.825956
+    #   chopped   I8  L12  NoCAP  X  I-COMMENT/0.893379
+    #
+    #   # 0.505999
+    #   Black   I1  L8  YesCAP  X  B-NAME/0.765461
+    #   pepper  I2  L8  NoCAP   X  I-NAME/0.756614
+    #   ,       I3  L8  NoCAP   X  OTHER/0.798040
+    #   to      I4  L8  NoCAP   X  B-COMMENT/0.683089
+    #   taste   I5  L8  NoCAP   X  I-COMMENT/0.848617
+    #
+    # i.e. the output of crf_test -v 1
+    #
+    for line in lines:
+        # blank line starts a new ingredient
+        if line in ('', '\n'):
+            data.append({})
+            display.append([])
+            prevTag = None
+            
+        # ignore comments
+        elif line[0] == "#":
+            pass
+
+        # otherwise it's a token
+        # e.g.: potato \t I2 \t L5 \t NoCAP \t B-NAME/0.978253
+        else:
+
+            columns = re.split('\t', line.strip())
+            token = columns[0].strip()
+
+            # unclump fractions
+            token = unclump(token)
+            
+            # turn B-NAME/123 back into "name"
+            tag, confidence = re.split(r'/', columns[-1], 1)
+            tag = re.sub('^[BI]\-', "", tag).lower()
+
+            # ---- DISPLAY ----
+            # build a structure which groups each token by its tag, so we can
+            # rebuild the original display name later.
+
+            if prevTag != tag:
+                display[-1].append((tag, [token]))
+                prevTag = tag
+                
+            else:
+                display[-1][-1][1].append(token)
+                #               ^- token
+                #            ^---- tag
+                #        ^-------- ingredient
+
+            # ---- DATA ----
+            # build a dict grouping tokens by their tag
+
+            # initialize this attribute if this is the first token of its kind
+            if tag not in data[-1]:
+                data[-1][tag] = []
+
+            # HACK: If this token is a unit, singularize it so Scoop accepts it.
+            if tag == "unit":
+                token = singularize(token)
+                
+            data[-1][tag].append(token)
+                
+    # reassemble the output into a list of dicts.
+    output = [
+        dict([(k, smartJoin(tokens))
+            for k, tokens in ingredient.items()])
+        for ingredient in data
+        if len(ingredient)
+    ]
+    
+    # Add the marked-up display data
+    for i, v in enumerate(output):
+        output[i]["display"] = displayIngredient(display[i])
+        
+        # Add the raw ingredient phrase
+        for i, v in enumerate(output):
+            output[i]["input"] = smartJoin(
+              [" ".join(tokens) for k, tokens in display[i]])
+            
+    return output
+
+def clumpFractions(s):
+    """
+    Replaces the whitespace between the integer and fractional part of a quantity
+    with a dollar sign, so it's interpreted as a single token. The rest of the
+    string is left alone.
+        clumpFractions("aaa 1 2/3 bbb")
+        # => "aaa 1$2/3 bbb"
+    """  
+    return re.sub(r'(\d+)\s+(\d)/(\d)', r'\1$\2/\3', s)
+
+def getFeatures(token, index, tokens):
+    """
+    Returns a list of features for a given token.
+    """
+    length = len(tokens)
+
+    return [("I%s" % index), ("L%s" % lengthGroup(length)),
+            ("Yes" if isCapitalized(token) else "No") + "CAP",
+            ("Yes" if insideParenthesis(token, tokens) else "No") + "PAREN"]
+
+def lengthGroup(actualLength):
+    """
+    Buckets the length of the ingredient into 6 buckets.
+    """
+    for n in [4, 8, 12, 16, 20]:
+        if actualLength < n:
+            return str(n)
+
+    return "X"
+
+def isCapitalized(token):
+    """
+    Returns true if a given token starts with a capital letter.
+    """
+    return re.match(r'^[A-Z]', token) is not None
+
+def insideParenthesis(token, tokens):
+    """
+    Returns true if the word is inside parenthesis in the phrase.
+    """
+    if token in ['(', ')']:
+        return True
+    else:
+        line = " ".join(tokens)
+        return re.match(r'.*\(.*' + re.escape(token) + '.*\).*',
+                        line) is not None
+
+def joinLine(columns):
+    return "\t".join(columns)
+
+def unclump(s):
+    """
+    Replacess $'s with spaces. The reverse of clumpFractions.
+    """
+    return re.sub(r'\$', " ", s)
+
+# HACK: fix this
+def smartJoin(words):
+    """
+        Joins list of words with spaces, but is smart about not adding spaces
+    before commas.
+    """
+
+    input = " ".join(words)
+    
+    # replace " , " with ", "
+    input = input.replace(" , ", ", ")
+
+    # replace " ( " with " ("
+    input = input.replace("( ", "(")
+
+    # replace " ) " with ") "
+    input = input.replace(" )", ")")
+    
+    return input
+
+def displayIngredient(ingredient):
+    """
+    Format a list of (tag, [tokens]) tuples as an HTML string for display.
+        displayIngredient([("qty", ["1"]), ("name", ["cat", "pie"])])
+        # => <span class='qty'>1</span> <span class='name'>cat pie</span>
+    """
+                    
+    return "".join([
+        "<span class='%s'>%s</span>" % (tag, " ".join(tokens))
+                for tag, tokens in ingredient
+            ])
+
+def singularize(word):
+    """
+    A poor replacement for the pattern.en singularize function, but ok for now.
+    """
+
+    units = {
+        "cups": "cup",
+        "tablespoons": "tablespoon",
+        "teaspoons": "teaspoon",
+        "pounds": "pound",
+        "ounces": "ounce",
+        "cloves": "clove",
+        "sprigs": "sprig",
+        "pinches": "pinch",
+        "bunches": "bunch",
+        "slices": "slice",
+        "grams": "gram",
+        "heads": "head",
+        "quarts": "quart",
+        "stalks": "stalk",
+        "pints": "pint",
+        "pieces": "piece",
+        "sticks": "stick",
+        "dashes": "dash",
+        "fillets": "fillet",
+        "cans": "can",
+        "ears": "ear",
+        "packages": "package",
+        "strips": "strip",
+        "bulbs": "bulb",
+        "bottles": "bottle"
+    }
+
+    if word in units.keys():
+        return units[word]
+    else:
+        return word
