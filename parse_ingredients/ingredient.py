@@ -2,6 +2,7 @@
 import re
 import tempfile
 import subprocess
+import importlib.resources
 from dataclasses import dataclass
 from .tokenizer import tokenize, clumpFractions
 
@@ -21,8 +22,9 @@ class Ingredient:
         self.comment=comment
         self.original_string=original_string
         
-    def parse(self, raw_ingredient=None, model="./models/ingredients.crfmodel"):
+    def parse(self, raw_ingredient=None):
         """"""
+        model=importlib.resources.path("parse_ingredients", "ingredients.crfmodel")
         self.original_string = raw_ingredient
         crf_output = self._exec_crf_test(self.original_string, model)
         data = self._import_data(crf_output.split("\n"))
