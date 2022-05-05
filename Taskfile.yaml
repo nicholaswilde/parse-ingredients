@@ -1,0 +1,30 @@
+---
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  init:
+    desc: Initiate virtual environment
+    cmds:
+      - python3 -m venv .venv
+  deactivate:
+    desc: Deactivate virtual environment
+    cmds:
+      - deactivate
+  reqs:
+    desc: Install requirements
+    cmds:
+      - pip install -r requirements-dev.txt
+  run:
+    desc: Run a case
+    cmds:
+      - python test.py
+  test:
+    desc: Run unit tests
+    cmds:
+      - python run_tests.py
+  default:
+    cmds:
+      - task -l
+    silent: true
