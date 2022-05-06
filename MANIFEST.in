@@ -1,2 +1,2 @@
-include models/*.crfmodel
+include parse_ingredients/*.crfmodel
 
