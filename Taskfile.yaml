@@ -4,6 +4,10 @@
 version: '3'
 
 tasks:
+  clean:
+    desc: Clean the dist
+    cmds:
+      - rm -rf ./dist/
   init:
     desc: Initiate virtual environment
     cmds:
@@ -12,6 +16,10 @@ tasks:
     desc: Deactivate virtual environment
     cmds:
       - deactivate
+  dist:
+    desc: Run setup
+    cmds:
+      - python setup.py sdist
   reqs:
     desc: Install requirements
     cmds:
